@@ -4,11 +4,11 @@ import math
 
 class InputEmbeddings(nn.Module):
     
-    def __init__(self, d_model: int, vocal_size: int):
+    def __init__(self, d_model: int, vocab_size: int):
         super().__init__()
         self.d_model = d_model
-        self.vocab_size = vocal_size
-        self.embedding = nn.Embedding(vocal_size, d_model)
+        self.vocab_size = vocab_size
+        self.embedding = nn.Embedding(vocab_size, d_model)
     
     def forward(self, x):
         return self.embedding(x) * math.sqrt(self.d_model)
@@ -53,7 +53,7 @@ class LayerNormalization(nn.Module):
 
 class FeedforwardBlock(nn.Module):
 
-    def __init_(self, d_model : int, d_ff : int, dropout : float) -> None:
+    def __init__(self, d_model : int, d_ff : int, dropout : float) -> None:
         super().__init__()
         self.linear_1 = nn.Linear(d_model, d_ff)
         self.dropout  = nn.Dropout(dropout)
@@ -90,7 +90,7 @@ class MultiHeadAttentionBlock(nn.Module):
 
         # (batch, h, seq_len, d_k) --> (batch, h, seq_len, seq_len)
         attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
-        if mask:
+        if mask is not None:
             attention_scores.masked_fill(mask == 0, -1e9)
         attention_scores = attention_scores.softmax(dim = -1) # (batch, h, seq_len, seq_len)
         if dropout:
@@ -213,13 +213,13 @@ class Transformer(nn.Module):
         self.tgt_pos = tgt_pos
         self.projection_layer = projection_layer
 
-    def encoder(self, src, src_mask):
+    def encode(self, src, src_mask):
         src = self.src_embed(src)
         src = self.src_pos(src)
         return self.encoder(src, src_mask)
     
 
-    def decoder(self, encode_output, src_mask, tgt, tgt_mask):
+    def decode(self, encode_output, src_mask, tgt, tgt_mask):
         tgt = self.tgt_embed(tgt)
         tgt = self.tgt_pos(tgt)
         return self.decoder(tgt, encode_output, src_mask, tgt_mask)
@@ -229,13 +229,13 @@ class Transformer(nn.Module):
 
 
 
-def build_transformer(src_vocal_size : int, tgt_vacab_size : int, 
+def build_transformer(src_vocab_size : int, tgt_vocab_size : int, 
                       src_seq_len: int, tgt_seq_len: int, d_model : int = 512, 
                       N : int = 6, h : int = 8, dropout : float = 0.1, 
                       d_ff : int = 2048) -> Transformer:
     
-    src_embed = InputEmbeddings(d_model, src_vocal_size)
-    tgt_embed = InputEmbeddings(d_model, tgt_vacab_size)
+    src_embed = InputEmbeddings(d_model, src_vocab_size)
+    tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
 
     src_pos = PositionEncoding(d_model, src_seq_len, dropout)
     tgt_pos = PositionEncoding(d_model, tgt_seq_len, dropout)
@@ -258,7 +258,7 @@ def build_transformer(src_vocal_size : int, tgt_vacab_size : int,
     
     encoder = Encoder(nn.ModuleList(encoder_blocks))
     decoder = Decoder(nn.ModuleList(decoder_blocks))
-    projection_layer = ProjectionLayer(d_model, tgt_vacab_size)
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
     transformer = Transformer(encoder, decoder, src_embed, tgt_embed, src_pos, tgt_pos, projection_layer)
     
 

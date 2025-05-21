@@ -18,12 +18,10 @@ from tqdm import tqdm
 from pathlib import Path
 import warnings
 
-def get_all_sentence(ds, lang):
+def get_all_sentences(ds, lang):
     for item in ds:
-        if lang == 'en':
-            yield item['translation']['en']
-        elif lang == 'de':
-            yield item['translation']['de']
+        if lang == 'en' or lang == 'it':
+            yield item['translation'][lang]
         else:
             raise ValueError(f"Unsupported language: {lang}")
 
@@ -31,10 +29,10 @@ def get_all_sentence(ds, lang):
 def get_or_build_tokenizer(config, ds, lang):
     tokenizer_path = Path(config['tokenizer_file'].format(lang))
     if not Path.exists(tokenizer_path):
-        tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
-        tokenizer.pre_tokenizer = WhitespaceSplit()
-        trainer = WordLevelTrainer(special_tokens=['[UNK]', '[PAD]', '[CLS]', '[SEP]', '[MASK]'], min_frequency=2)
-        tokenizer.train_from_iterator(get_all_sentence(ds, lang), trainer=trainer)
+        tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
+        tokenizer.pre_tokenizer = Whitespace()
+        trainer = WordLevelTrainer(special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequency=2)
+        tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
         tokenizer.save(str(tokenizer_path))
     else:
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
@@ -106,6 +104,7 @@ def train_model(config):
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_tgt.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
     for epoch in range(initial_epoch, config['num_epochs']):
+        torch.cuda.empty_cache()
         model.train()
         batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{config['num_epochs']}", unit="batch")
         for batch in train_dataloader:
@@ -116,8 +115,8 @@ def train_model(config):
 
             # run the tensors though the model
 
-            encoder_output = model.encoder(encoder_input, encoder_mask) # (batch_size, seq_len, d_model)
-            decoder_output = model.decoder(encoder_output, encoder_mask, decoder_input, decoder_mask) # (batch_size, seq_len, d_model)
+            encoder_output = model.encode(encoder_input, encoder_mask) # (batch_size, seq_len, d_model)
+            decoder_output = model.decode(encoder_output, encoder_mask, decoder_input, decoder_mask) # (batch_size, seq_len, d_model)
             projection_output = model.project(decoder_output) # (batch_size, seq_len, tgt_vocab_size)
 
             label = batch['label'].to(device) # (batch_size, seq_len)
