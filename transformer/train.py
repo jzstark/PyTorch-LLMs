@@ -10,7 +10,7 @@ from tokenizers.trainers import WordLevelTrainer, BpeTrainer
 from tokenizers.pre_tokenizers import Whitespace, WhitespaceSplit
 from tokenizers.pre_tokenizers import PreTokenizer
 
-from dataset import BilingualDataset
+from dataset import BilingualDataset, causal_mask
 from model import build_transformer
 from config import get_config, get_weights_file_path
 from tqdm import tqdm
@@ -18,6 +18,78 @@ from tqdm import tqdm
 from pathlib import Path
 import warnings
 
+
+def greedy_decode(model, source, source_mask, tokenizer_src, 
+                  tokenizer_tgt, max_len, device):
+    sos_idx = tokenizer_tgt.token_to_id('[SOS]')
+    eos_idx = tokenizer_tgt.token_to_id('[EOS]')
+
+    # precompute the encoder output and reuse it for every token we get from the decoder
+    encoder_output = model.encode(source, source_mask) # (1, seq_len, d_model)
+    # initialize the decoder input with SOS token
+    decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device) # (1, 1)
+    while True:
+        if decoder_input.size(1) >= max_len:
+            break
+        
+        # build mask for the target
+        decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device) # (1, 1, seq_len, seq_len)
+            
+        # calculate the decoder output, reusing encoder_output 
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask) # (1, seq_len, d_model)
+        
+        # get the next token
+        prob = model.project(out[:,-1]) # (1, 1, tgt_vocab_size)
+        _, next_word = torch.max(prob, dim=1) # (1, 1)
+        decoder_input = torch.cat([decoder_input, torch.empty(1,1).type_as(source).fill_(next_word.item())], dim=1) 
+
+        if next_word == eos_idx:
+            break
+
+    return decoder_input.squeeze(0) # (seq_len,)
+
+
+
+def run_validation(model, validation_ds, tokenizer_src, 
+                   tokenizer_tgt, max_len, device, print_msg,
+                   global_step, writer, num_samples=2):
+    model.eval()
+    count = 0
+    source_texts = []
+    expected_texts = []
+    predicted_texts = []
+    console_width = 80
+
+    with torch.no_grad():
+        for batch in validation_ds:
+            count += 1
+            encoder_input = batch['encoder_input'].to(device) # (batch_size, seq_len)
+            encoder_mask  = batch['encoder_mask'].to(device)  # (batch_size, 1, 1, seq_len)
+            assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
+
+            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device) 
+            
+            source_text = batch['src_text'][0]
+            target_text = batch['tgt_text'][0]
+            model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
+
+            source_texts.append(source_text)
+            expected_texts.append(target_text)
+            predicted_texts.append(model_out_text)
+
+            print_msg('-' * console_width)
+            print_msg(f"Source: {source_text}")
+            print_msg(f"Expected: {target_text}")
+            print_msg(f"Predicted: {model_out_text}")
+
+            if count >= num_samples:
+                break
+    
+    #if writer:
+    #    # TorchMetrics, CharErrorRate, WordErrorRate
+
+
+           
 def get_all_sentences(ds, lang):
     for item in ds:
         if lang == 'en' or lang == 'it':
@@ -107,7 +179,7 @@ def train_model(config):
         torch.cuda.empty_cache()
         model.train()
         batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{config['num_epochs']}", unit="batch")
-        for batch in train_dataloader:
+        for batch in batch_iterator:
             encoder_input = batch['encoder_input'].to(device) # (batch_size, seq_len)
             decoder_input = batch['decoder_input'].to(device) # (batch_size, seq_len)
             encoder_mask  = batch['encoder_mask'].to(device)  # (batch_size, 1, 1, seq_len)
@@ -138,6 +210,12 @@ def train_model(config):
             optimizer.zero_grad()
 
             global_step += 1
+        
+         # run validation 
+        run_validation(model, val_dataloader, tokenizer_src, 
+                        tokenizer_tgt, config['seq_len'], device, 
+                        lambda msg: batch_iterator.write(msg), 
+                        global_step, writer)
         
         # save the model    
         model_filename = get_weights_file_path(config, f"{epoch:02d}")
